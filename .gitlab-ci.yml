@@ -1,0 +1,366 @@
+# Copyright (c) 2022-2023 Simon Josefsson.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+#
+#   1. Redistributions of source code must retain the above copyright
+#   notice, this list of conditions and the following disclaimer.
+#
+#   2. Redistributions in binary form must reproduce the above
+#   copyright notice, this list of conditions and the following
+#   disclaimer in the documentation and/or other materials provided
+#   with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+# FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+# COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+# INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+# BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+# ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+#
+# SPDX-License-Identifier: BSD-2-Clause
+
+default:
+  interruptible: true
+  artifacts:
+    when: always
+    paths:
+    - "*.tar.gz"
+    - ./*.log
+    - ./config.h
+    - ./**/*.log
+
+.bootstrap:
+  script:
+  - ./bootstrap
+
+.tarball:
+  stage: test
+  script:
+  - tar xfa libgssglue-*.tar.gz
+  - cd `ls -d libgssglue-* | grep -v tar.gz`
+
+.localchecks:
+  script:
+  - cc -o a tests/generic.c -Isrc/gssglue src/.libs/libgssglue.a -ldl
+  - ./a
+  - cc -o b tests/generic.c -Isrc/gssglue src/.libs/libgssglue.so -ldl
+  - LD_PRELOAD=src/.libs/libgssglue.so ./b
+  - make install
+  - cc -o c tests/generic.c -I/usr/local/include/gssglue -L/usr/local/lib -Wl,-rpath,/usr/local/lib -lgssglue -ldl
+  - ./c
+
+CentOS7:
+  stage: build
+  image: centos:7
+  before_script:
+  - yum update -y | tail
+  - yum -y install make gcc autoconf automake libtool | tail
+  script:
+  - !reference [.bootstrap, script]
+  - ./configure
+  - make check V=1 VERBOSE=t CPPFLAGS="-Wall"
+  - make distcheck V=1
+  - !reference [.localchecks, script]
+
+Debian11:
+  stage: build
+  image: debian:11-slim
+  before_script:
+  - apt-get update -qq | tail
+  - env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq autoconf automake libtool make git valgrind | tail
+  script:
+  - !reference [.bootstrap, script]
+  - ./configure
+  - make check V=1 VERBOSE=t CPPFLAGS="-Wall -Werror"
+  - make distcheck V=1
+  - make check LOG_COMPILER="valgrind --error-exitcode=1 --leak-check=full"
+  - !reference [.localchecks, script]
+  - git diff --exit-code # nothing should change version controlled files
+
+Trisquel11:
+  stage: build
+  image: kpengboy/trisquel:11.0
+  before_script:
+  - apt-get update -qq | tail
+  - env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq autoconf automake libtool make git valgrind | tail
+  script:
+  - !reference [.bootstrap, script]
+  - ./configure
+  - make check V=1 VERBOSE=t CPPFLAGS="-Wall -Werror"
+  - make distcheck V=1
+  - make check LOG_COMPILER="valgrind --error-exitcode=1 --leak-check=full"
+  - !reference [.localchecks, script]
+  - git diff --exit-code # nothing should change version controlled files
+
+Ubuntu-rolling:
+  stage: build
+  image: ubuntu:rolling
+  before_script:
+  - apt-get update -qq | tail
+  - env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq autoconf automake libtool make git valgrind indent | tail
+  script:
+  - !reference [.bootstrap, script]
+  - ./configure
+  - make check V=1 VERBOSE=t CPPFLAGS="-Wall -Werror"
+  - make distcheck V=1
+  - make check LOG_COMPILER="valgrind --error-exitcode=1 --leak-check=full"
+  - !reference [.localchecks, script]
+  - make indent
+  - git diff --exit-code # nothing should change version controlled files
+
+Gentoo:
+  stage: build
+  image: gentoo/stage3
+  script:
+  - !reference [.bootstrap, script]
+  - ./configure
+  - make check V=1 VERBOSE=t CPPFLAGS="-Wall -Werror"
+  - make distcheck V=1
+  - !reference [.localchecks, script]
+
+# https://docs.gitlab.com/ee/user/application_security/sast/
+sast:
+  stage: build
+include:
+- template: Security/SAST.gitlab-ci.yml
+
+# https://clang.llvm.org/docs/AddressSanitizer.html
+# https://github.com/google/sanitizers/wiki/AddressSanitizer
+# https://clang.llvm.org/docs/UndefinedBehaviorSanitizer.html
+# https://clang.llvm.org/docs/LeakSanitizer.html
+# https://github.com/google/sanitizers/wiki/AddressSanitizerLeakSanitizer
+# https://github.com/google/sanitizers/wiki/AddressSanitizerFlags
+Fedora39-clang-ASan-UBSan:
+  image: fedora:39
+  stage: build
+  interruptible: true
+  before_script:
+  - dnf update -y | tail
+  - dnf -y install make clang autoconf automake libtool git indent | tail
+  script:
+  - ./bootstrap
+  - ./configure CC=clang CFLAGS="-g -O1 -fsanitize=undefined -fsanitize=address -fsanitize-address-use-after-scope -fno-sanitize-recover=undefined -fno-omit-frame-pointer -fno-optimize-sibling-calls"
+  - ASAN_OPTIONS=detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1 make check VERBOSE=t V=1
+  - make indent
+  - git diff --exit-code # nothing should change version controlled files
+
+# https://www.synopsys.com/blogs/software-security/integrating-coverity-scan-with-gitlab-ci/
+Coverity:
+  stage: build
+  image: debian:11-slim
+  only:
+    refs:
+      - master
+      - coverity
+  allow_failure: true
+  interruptible: true
+  before_script:
+  - apt-get update -qq | tail
+  - env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq autoconf automake libtool make git curl | tail
+  script:
+  - test -n "$COVERITY_SCAN_TOKEN" && test -n "$COVERITY_SCAN_PROJECT_NAME"
+  - curl -o /tmp/cov-analysis-linux64.tgz https://scan.coverity.com/download/linux64
+    --form project=$COVERITY_SCAN_PROJECT_NAME --form token=$COVERITY_SCAN_TOKEN
+  - sha1sum /tmp/cov-analysis-linux64.tgz
+  - tar xfz /tmp/cov-analysis-linux64.tgz
+  - time ./bootstrap
+  - time ./configure CFLAGS="-g -Og"
+  - cov-analysis-linux64-*/bin/cov-build --dir cov-int make check -j$(nproc)
+  - tar cfz cov-int.tar.gz cov-int
+  - curl https://scan.coverity.com/builds?project=$COVERITY_SCAN_PROJECT_NAME
+    --form token=$COVERITY_SCAN_TOKEN --form email=$GITLAB_USER_EMAIL
+    --form file=@cov-int.tar.gz --form version="`git describe --tags`"
+    --form description="`git describe --tags` / $CI_COMMIT_TITLE / $CI_COMMIT_REF_NAME:$CI_PIPELINE_ID"
+  artifacts:
+    expire_in: 1 week
+    paths:
+      - cov-int/*.txt
+
+# https://docs.gitlab.com/ee/ci/runners/saas/macos/environment.html
+macOs12Xcode14:
+  when: manual
+  allow_failure: true
+  stage: build
+  image: macos-12-xcode-14
+  tags: [ saas-macos-medium-m1 ]
+  before_script:
+  - env HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 brew install autoconf automake libtool
+  script:
+  - !reference [.bootstrap, script]
+  - ./configure
+  - make check V=1 VERBOSE=t CPPFLAGS="-Wall"
+  - make distcheck V=1
+  - !reference [.localchecks, script]
+
+macOs13Xcode14:
+  when: manual
+  allow_failure: true
+  stage: build
+  image: macos-13-xcode-14
+  tags: [ saas-macos-medium-m1 ]
+  before_script:
+  - env HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 brew install autoconf automake libtool
+  script:
+  - !reference [.bootstrap, script]
+  - ./configure
+  - make check V=1 VERBOSE=t CPPFLAGS="-Wall"
+  - make distcheck V=1
+  - !reference [.localchecks, script]
+
+AlmaLinux8:
+  extends: .tarball
+  image: almalinux:8
+  needs: [Trisquel11]
+  before_script:
+  - yum -y install make gcc | tail
+  script:
+  - !reference [.tarball, script]
+  - ./configure
+  - make check V=1 VERBOSE=t CPPFLAGS="-Wall -Werror"
+  - make distcheck V=1
+  - !reference [.localchecks, script]
+
+Ubuntu2204:
+  extends: .tarball
+  image: ubuntu:22.04
+  needs: [Trisquel11]
+  before_script:
+  - apt-get update -qq | tail
+  - env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq make gcc | tail
+  script:
+  - !reference [.tarball, script]
+  - ./configure
+  - make check V=1 VERBOSE=t CPPFLAGS="-Wall -Werror"
+  - make distcheck V=1
+  - !reference [.localchecks, script]
+
+ArchLinux-tcc:
+  extends: .tarball
+  image: archlinux:latest
+  needs: [Trisquel11]
+  before_script:
+  - pacman -Syu --noconfirm make tcc binutils | tail
+  script:
+  - !reference [.tarball, script]
+  - ./configure CC=tcc
+  - make check V=1 VERBOSE=t CPPFLAGS="-Wall"
+  - make distcheck V=1 DISTCHECK_CONFIGURE_FLAGS='CC=tcc'
+  - tcc -o a tests/generic.c -Isrc/gssglue src/.libs/libgssglue.a -ldl
+  - ./a
+  - tcc -o b tests/generic.c -Isrc/gssglue src/.libs/libgssglue.so -ldl
+  - LD_PRELOAD=src/.libs/libgssglue.so ./b
+  - make install
+  - tcc -o c tests/generic.c -I/usr/local/include/gssglue -L/usr/local/lib -Wl,-rpath,/usr/local/lib -lgssglue -ldl
+  - ./c
+
+Fedora39-clang:
+  extends: .tarball
+  image: fedora:36
+  needs: [Trisquel11]
+  before_script:
+  - dnf -y install make clang | tail
+  script:
+  - !reference [.tarball, script]
+  - ./configure CC=clang
+  - make check V=1 VERBOSE=t CPPFLAGS="-Wall -Werror"
+  - make distcheck V=1 DISTCHECK_CONFIGURE_FLAGS='CC=clang'
+  - clang -o a tests/generic.c -Isrc/gssglue src/.libs/libgssglue.a -ldl
+  - ./a
+  - clang -o b tests/generic.c -Isrc/gssglue src/.libs/libgssglue.so -ldl
+  - LD_PRELOAD=src/.libs/libgssglue.so ./b
+  - make install
+  - clang -o c tests/generic.c -I/usr/local/include/gssglue -L/usr/local/lib -Wl,-rpath,/usr/local/lib -lgssglue -ldl
+  - ./c
+
+Mingw32:
+  when: manual
+  allow_failure: true
+  extends: .tarball
+  image: debian:12-slim
+  needs: [Trisquel11]
+  before_script:
+    - dpkg --add-architecture i386
+    - apt-get update -qq
+    - env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq make mingw-w64 wine wine32 wine64 libwine libwine:i386 binfmt-support wine-binfmt
+    - update-binfmts --enable wine
+  script:
+  - !reference [.tarball, script]
+  - ./configure --host=i686-w64-mingw32 CC='i686-w64-mingw32-gcc -static-libgcc'
+  - make check V=1 VERBOSE=t
+
+B-gcc:
+  extends: .tarball
+  image: gcc:latest
+  needs: [Trisquel11]
+  before_script:
+  - gcc --version
+  script:
+  - !reference [.tarball, script]
+  - ./configure CC="/usr/local/bin/gcc -std=gnu2x"
+  - make check V=1 VERBOSE=t CPPFLAGS="-Wall -Werror"
+  - make distcheck V=1
+  - !reference [.localchecks, script]
+
+B-clang:
+  extends: .tarball
+  image: silkeh/clang:latest
+  needs: [Trisquel11]
+  before_script:
+  - clang --version
+  script:
+  - !reference [.tarball, script]
+  - ./configure CC="clang -std=gnu2x"
+  - make check V=1 VERBOSE=t CPPFLAGS="-Wall -Werror"
+  - make distcheck V=1 DISTCHECK_CONFIGURE_FLAGS='CC=clang'
+  - !reference [.localchecks, script]
+
+D12-coverage:
+  stage: build
+  image: debian:12-slim
+  stage: build
+  before_script:
+  - apt-get update -qq | tail
+  - env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq autoconf automake libtool make git lcov | tail
+  script:
+  - ./bootstrap
+  - ./configure
+  - lcov --directory . --zerocounters
+  - make check CFLAGS="-g --coverage" VERBOSE=t
+  - mkdir -p coverage
+  - lcov --directory . --output-file coverage/libgssglue.info --capture
+  - genhtml --output-directory coverage coverage/libgssglue.info
+            --highlight --frames --legend --title "Libgssglue"
+  - git diff --exit-code # nothing should change version controlled files
+  artifacts:
+    when: on_success
+    paths:
+      - coverage
+
+.pages:
+  stage: deploy
+  needs: ["D12-coverage"]
+  script:
+    - mkdir public
+    - mv coverage/ public/
+  artifacts:
+    paths:
+    - public
+    expire_in: 30 days
+
+pages:
+  extends: .pages
+  only:
+    - master
+
+pages-test:
+  extends: .pages
+  except:
+    - master

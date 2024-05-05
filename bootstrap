@@ -1,0 +1,7 @@
+#!/bin/sh
+
+set -x
+
+touch ChangeLog
+
+autoreconf --install --verbose
